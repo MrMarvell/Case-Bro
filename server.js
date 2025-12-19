@@ -1,7 +1,10 @@
 // case-bros custom server (Express + Next.js + Steam OpenID)
 const express = require('express');
 const next = require('next');
-const cookieSession = require('cookie-session');
+
+// ✅ SWAPPED: cookie-session -> express-session
+const session = require('express-session');
+
 const passport = require('passport');
 const SteamStrategy = require('passport-steam').Strategy;
 
@@ -84,14 +87,20 @@ function upsertCaseWithItems(payload) {
 app.prepare().then(() => {
   const server = express();
 
+  // ✅ Keep trust proxy (important on Render)
   server.set('trust proxy', 1);
 
-  server.use(cookieSession({
+  // ✅ SWAPPED: use express-session so Passport Steam can call req.session.regenerate()
+  server.use(session({
     name: 'casebros',
-    keys: [config.SESSION_SECRET],
-    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-    sameSite: 'lax',
-        secure: !dev,
+    secret: config.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+      sameSite: 'lax',
+      secure: !dev, // true in production (https)
+    },
   }));
 
   server.use(passport.initialize());
@@ -211,7 +220,6 @@ app.prepare().then(() => {
     const boost = getBrosBoostEvent(new Date());
     try {
       const result = openCase({ userId: req.user.id, slug, clientSeed, brokenEvent: broken, boostEvent: boost });
-      // refresh me for client
       const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
       req.user.gems = (u.gems_cents / 100).toFixed(2);
       req.user.server_seed_hash = u.server_seed_hash;
@@ -226,7 +234,6 @@ app.prepare().then(() => {
     const boost = getBrosBoostEvent(new Date());
     try {
       const result = claimStreak(req.user.id, boost);
-      // refresh me
       const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
       req.user.gems = (u.gems_cents / 100).toFixed(2);
       req.user.streak_day = u.streak_day;
@@ -244,7 +251,6 @@ app.prepare().then(() => {
     const { inventoryId } = req.body || {};
     try {
       const result = sellItem(req.user.id, inventoryId);
-      // refresh
       const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
       req.user.gems = (u.gems_cents / 100).toFixed(2);
       res.json(result);
@@ -344,3 +350,4 @@ app.prepare().then(() => {
   console.error(err);
   process.exit(1);
 });
+
