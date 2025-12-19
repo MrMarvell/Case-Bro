@@ -1,7 +1,7 @@
 // case-bros custom server (Express + Next.js + Steam OpenID)
 const express = require('express');
 const next = require('next');
-const session = require('express-session');
+const cookieSession = require('cookie-session');
 const passport = require('passport');
 const SteamStrategy = require('passport-steam').Strategy;
 
@@ -57,13 +57,11 @@ function upsertCaseWithItems(payload) {
     parseGemsToCents(payload.casePrice),
     parseGemsToCents(payload.keyPrice),
   );
-
   const row = db.prepare('SELECT * FROM cases WHERE slug=?').get(payload.slug);
 
   for (const it of (payload.items || [])) {
     const existing = db.prepare('SELECT * FROM items WHERE name=? AND rarity=?').get(it.name, it.rarity);
     let itemRow = existing;
-
     if (!existing) {
       const info = db.prepare('INSERT INTO items(name,rarity,image_url,price_cents) VALUES(?,?,?,?)')
         .run(it.name, it.rarity, it.imageUrl || null, parseGemsToCents(it.price));
@@ -86,22 +84,27 @@ function upsertCaseWithItems(payload) {
 app.prepare().then(() => {
   const server = express();
 
-  // IMPORTANT for Render / proxies (so secure cookies work)
+  // IMPORTANT for Render/HTTPS proxy so secure cookies work
   server.set('trust proxy', 1);
 
-  // ✅ Use express-session (Passport needs this)
-  server.use(session({
-    name: 'casebros.sid',
-    secret: config.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    proxy: true,
-    cookie: {
-      httpOnly: true,
-      sameSite: 'lax',
-      secure: !dev
-    }
+  server.use(cookieSession({
+    name: 'casebros',
+    keys: [config.SESSION_SECRET],
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+    sameSite: 'lax',
+    secure: !dev,
   }));
+
+  // ✅ FIX: cookie-session doesn't implement regenerate/save but Passport expects them
+  server.use((req, res, nextFn) => {
+    if (req.session && typeof req.session.regenerate !== 'function') {
+      req.session.regenerate = (cb) => cb && cb();
+    }
+    if (req.session && typeof req.session.save !== 'function') {
+      req.session.save = (cb) => cb && cb();
+    }
+    nextFn();
+  });
 
   server.use(passport.initialize());
   server.use(passport.session());
@@ -113,7 +116,7 @@ app.prepare().then(() => {
   });
 
   if (!config.STEAM_API_KEY) {
-    console.warn('⚠️  STEAM_API_KEY is empty. Steam login will not work until you set it in Render env vars.');
+    console.warn('⚠️  STEAM_API_KEY is empty. Steam login will not work until you set it in .env');
   }
 
   passport.use(new SteamStrategy({
@@ -137,8 +140,11 @@ app.prepare().then(() => {
   server.get('/auth/steam/return', passport.authenticate('steam', { failureRedirect: '/' }), (req, res) => {
     res.redirect('/');
   });
+
   server.get('/auth/logout', (req, res) => {
-    req.logout(() => res.redirect('/'));
+    req.logout(() => {
+      res.redirect('/');
+    });
   });
 
   // API
@@ -176,7 +182,6 @@ app.prepare().then(() => {
   server.get('/api/cases/:slug', (req, res) => {
     const c = db.prepare('SELECT * FROM cases WHERE slug=? AND active=1').get(req.params.slug);
     if (!c) return res.status(404).json({ error: 'not_found' });
-
     const items = db.prepare(`
       SELECT ci.weight, i.id, i.name, i.rarity, i.image_url, i.price_cents
       FROM case_items ci JOIN items i ON i.id = ci.item_id
@@ -215,18 +220,14 @@ app.prepare().then(() => {
     if (!clientSeed || typeof clientSeed !== 'string' || clientSeed.length < 3 || clientSeed.length > 64) {
       return res.status(400).json({ error: 'bad_client_seed' });
     }
-
     const broken = getBrokenCaseEvent(new Date());
     const boost = getBrosBoostEvent(new Date());
-
     try {
       const result = openCase({ userId: req.user.id, slug, clientSeed, brokenEvent: broken, boostEvent: boost });
-
       const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
       req.user.gems = (u.gems_cents / 100).toFixed(2);
       req.user.server_seed_hash = u.server_seed_hash;
       req.user.streak_day = u.streak_day;
-
       res.json(result);
     } catch (e) {
       res.status(400).json({ error: String(e.message || e) });
@@ -237,11 +238,9 @@ app.prepare().then(() => {
     const boost = getBrosBoostEvent(new Date());
     try {
       const result = claimStreak(req.user.id, boost);
-
       const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
       req.user.gems = (u.gems_cents / 100).toFixed(2);
       req.user.streak_day = u.streak_day;
-
       res.json(result);
     } catch (e) {
       res.status(400).json({ error: String(e.message || e) });
@@ -256,10 +255,8 @@ app.prepare().then(() => {
     const { inventoryId } = req.body || {};
     try {
       const result = sellItem(req.user.id, inventoryId);
-
       const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
       req.user.gems = (u.gems_cents / 100).toFixed(2);
-
       res.json(result);
     } catch (e) {
       res.status(400).json({ error: String(e.message || e) });
@@ -278,16 +275,12 @@ app.prepare().then(() => {
   server.get('/api/giveaways/:id', (req, res) => {
     const g = getGiveaway(req.params.id);
     if (!g) return res.status(404).json({ error: 'not_found' });
-
     const pool = getPool();
     let myEntries = 0;
-
     if (req.user) {
-      const row = db.prepare('SELECT entries FROM giveaway_entries WHERE giveaway_id=? AND user_id=?')
-        .get(g.id, req.user.id);
+      const row = db.prepare('SELECT entries FROM giveaway_entries WHERE giveaway_id=? AND user_id=?').get(g.id, req.user.id);
       myEntries = row ? row.entries : 0;
     }
-
     res.json({
       giveaway: { ...g, locked: pool.tier < g.tier_required },
       pool,
@@ -298,13 +291,10 @@ app.prepare().then(() => {
   server.post('/api/giveaways/:id/enter', requireAuth, (req, res) => {
     const pool = getPool();
     const entries = req.body?.entries;
-
     try {
       const result = enterGiveaway(req.user.id, Number(req.params.id), entries, pool.tier);
-
       const u = db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
       req.user.gems = (u.gems_cents / 100).toFixed(2);
-
       res.json(result);
     } catch (e) {
       res.status(400).json({ error: String(e.message || e) });
@@ -346,16 +336,7 @@ app.prepare().then(() => {
     db.prepare(`
       INSERT INTO giveaways(title,description,tier_required,prize_text,starts_at,ends_at,status,created_at)
       VALUES(?,?,?,?,?,?,?,?)
-    `).run(
-      title,
-      description || '',
-      Math.max(0, Math.floor(Number(tier_required) || 0)),
-      prize_text,
-      starts_at,
-      ends_at,
-      'active',
-      nowIso()
-    );
+    `).run(title, description || '', Math.max(0, Math.floor(Number(tier_required) || 0)), prize_text, starts_at, ends_at, 'active', nowIso());
 
     res.json({ ok: true });
   });
@@ -366,7 +347,6 @@ app.prepare().then(() => {
   // start schedulers
   startSchedulers();
 
-  // Render provides PORT automatically; lib/config will pick it up from process.env.PORT
   server.listen(config.PORT, () => {
     console.log(`✅ case-bros running on ${config.BASE_URL} (port ${config.PORT})`);
   });
