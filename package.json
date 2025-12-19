@@ -2,7 +2,7 @@
   "name": "case-bros",
   "private": true,
   "version": "0.1.0",
-  "description": "case-bros \u2014 free CS2 case opening simulator with gems, mastery, events, giveaways, and leaderboards.",
+  "description": "case-bros – free CS2 case opening simulator with gems, mastery, events, giveaways, and leaderboards.",
   "scripts": {
     "dev": "cross-env NODE_ENV=development node server.js",
     "build": "next build",
